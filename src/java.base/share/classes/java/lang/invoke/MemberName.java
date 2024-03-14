@@ -23,10 +23,18 @@
  * questions.
  */
 
+/*
+ * ===========================================================================
+ * (c) Copyright IBM Corp. 2024, 2024 All Rights Reserved
+ * ===========================================================================
+ */
+
 package java.lang.invoke;
 
 import sun.invoke.util.VerifyAccess;
 
+import java.lang.ref.Cleaner;
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Member;
@@ -554,6 +562,7 @@ final class MemberName implements Member, Cloneable {
             throw new LinkageError(m.toString());
         }
         assert(isResolved());
+        registerCleaningAction();
         this.name = m.getName();
         if (this.type == null)
             this.type = new Object[] { m.getReturnType(), m.getParameterTypes() };
@@ -615,6 +624,7 @@ final class MemberName implements Member, Cloneable {
         // fill in vmtarget, vmindex while we have ctor in hand:
         MethodHandleNatives.init(this, ctor);
         assert(isResolved() && this.clazz != null);
+        registerCleaningAction();
         this.name = CONSTRUCTOR_NAME;
         if (this.type == null)
             this.type = new Object[] { void.class, ctor.getParameterTypes() };
@@ -634,6 +644,7 @@ final class MemberName implements Member, Cloneable {
         // fill in vmtarget, vmindex while we have fld in hand:
         MethodHandleNatives.init(this, fld);
         assert(isResolved() && this.clazz != null);
+        registerCleaningAction();
         this.name = fld.getName();
         this.type = fld.getType();
         byte refKind = this.getReferenceKind();
@@ -958,6 +969,7 @@ final class MemberName implements Member, Cloneable {
                 if (m == null && speculativeResolve) {
                     return null;
                 }
+                m.registerCleaningAction();
                 m.checkForTypeAlias(m.getDeclaringClass());
                 m.resolution = null;
             } catch (ClassNotFoundException | LinkageError ex) {
@@ -1003,5 +1015,36 @@ final class MemberName implements Member, Cloneable {
                 return result;
             return null;
         }
+    }
+
+    private static final Cleaner CLEANER = Cleaner.create();
+
+    private static class CleaningAction implements Runnable {
+        // This can't be a strong reference or we'll prevent unloading of (at
+        // least some?) LambdaForm-generated classes. The generated class has a
+        // static final field containing a reference to the LF, whose vmentry
+        // is a MemberName naming a method of the generated class. If this were
+        // a strong reference, then that MemberName would be strongly reachable
+        // via its cleaning action, and so its cleaning action wouldn't be able
+        // to run, which would keep the MemberName and therefore also its clazz
+        // strongly reachable indefinitely.
+        private final WeakReference<Class<?>> clazz;
+
+        public CleaningAction(Class<?> clazz) {
+            clazz.getClass(); // null check
+            this.clazz = new WeakReference<Class<?>>(clazz);
+        }
+
+        @Override
+        public void run() {
+            Class<?> c = clazz.get();
+            if (null != c) {
+                MethodHandleNatives.markClassForMemberNamePruning(c);
+            }
+        }
+    }
+
+    private void registerCleaningAction() {
+        CLEANER.register(this, new CleaningAction(clazz));
     }
 }
